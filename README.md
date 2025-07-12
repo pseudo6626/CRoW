@@ -1,3 +1,5 @@
+![crow logo](https://github.com/pseudo6626/CRoW/blob/main/crow_logo1.png)
+
 # CRoW
 Colonization Route Workbench (CRoW) helps you identify routes to target systems from existing populated systems in a visual and customizable manner. 
 
