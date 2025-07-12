@@ -12,6 +12,8 @@ from tkinter import ttk, messagebox
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.widgets import Button
+import warnings
+warnings.filterwarnings("ignore", message="Starting a Matplotlib GUI outside of the main thread will likely fail")
 
 ARDENT_BASE = "https://api.ardent-insight.com/v2/system/name"
 coords_cache = {}
@@ -20,6 +22,58 @@ refuel_cache = {}
 current_path = []
 latest_status = {"current": "", "target": "", "path_len": 0, "remaining": 0.0, "targets": [], "legend_extra": ""}
 search_stop_event = threading.Event()
+plotting_failed = False
+pause_plot_updates = threading.Event()
+
+
+
+
+def show_route_summary_popup(route):
+    def build_text():
+        lines = ["Final Route:"]
+        total = 0.0
+        for i in range(len(route)):
+            line = f"{i+1}. {route[i]}"
+            if i > 0:
+                a = get_coordinates(route[i - 1])
+                b = get_coordinates(route[i])
+                dist = distance_squared(a, b) ** 0.5
+                total += dist
+                line += f"  ({dist:.2f} ly)"
+            lines.append(line)
+        lines.append(f"\nTotal Distance: {total:.2f} ly")
+        return "\n".join(lines)
+
+    summary_text = build_text()
+
+    win = tk.Toplevel()
+    win.title("Route Summary")
+    win.geometry("600x400")
+
+    # Scrollable text area
+    frame = tk.Frame(win)
+    frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+    scrollbar = tk.Scrollbar(frame)
+    scrollbar.pack(side="right", fill="y")
+
+    text_area = tk.Text(frame, wrap="word", yscrollcommand=scrollbar.set, font=("Courier New", 11))
+    text_area.insert("1.0", summary_text)
+    text_area.config(state="disabled")  # Make read-only
+    text_area.pack(side="left", fill="both", expand=True)
+    scrollbar.config(command=text_area.yview)
+
+    # Copy button
+    def copy_to_clipboard():
+        win.clipboard_clear()
+        win.clipboard_append(summary_text)
+        win.update()  # required to flush clipboard on some platforms
+
+    copy_btn = tk.Button(win, text="Copy to Clipboard", command=copy_to_clipboard, font=("Helvetica", 11))
+    copy_btn.pack(pady=5)
+
+    # Close button
+    tk.Button(win, text="Close", command=win.destroy, font=("Helvetica", 11)).pack(pady=5)
 
 def distance_squared(a, b):
     return sum((a[i] - b[i]) ** 2 for i in range(3))
@@ -32,18 +86,31 @@ def get_coordinates(system_name):
 def get_populated_targets(start_system):
     if start_system in refuel_cache:
         return refuel_cache[start_system]
+
     url = f"{ARDENT_BASE}/{start_system}/nearest/refuel"
     r = requests.get(url)
     r.raise_for_status()
-    systems = [s['systemName'] for s in r.json() if 'systemName' in s]
+    raw_systems = r.json()
+
+    allowed_station_types = {"Outpost", "Coriolis", "Ocellus", "Orbis"}
+    filtered = []
+
+    for s in raw_systems:
+        if "systemName" in s and "stationType" in s:
+            if s["stationType"] in allowed_station_types:
+                filtered.append(s["systemName"])
+                break
+
+    # Remove duplicates
+    unique = []
     seen = set()
-    unique_systems = []
-    for s in systems:
-        if s not in seen:
-            seen.add(s)
-            unique_systems.append(s)
-    refuel_cache[start_system] = unique_systems
-    return unique_systems
+    for name in filtered:
+        if name not in seen:
+            seen.add(name)
+            unique.append(name)
+
+    refuel_cache[start_system] = unique
+    return unique
 
 def get_nearby_systems(system_name):
     if system_name in nearby_cache:
@@ -122,7 +189,8 @@ def find_path(start, targets):
             "target": closest_target,
             "path_len": len(path),
             "remaining": remaining_dist ** 0.5,
-            "targets": targets
+            "targets": targets,
+            "plotting_failed": False
         })
 
         current_path.clear()
@@ -139,6 +207,8 @@ def find_path(start, targets):
             h = min(distance_squared(coords_cache[neighbor_name], tc) for tc in target_coords.values())
             heapq.heappush(heap, (h, path + [neighbor_name], neighbor_name))
 
+    latest_status["plotting_failed"] = True
+    plotting_failed=True
     return None
 
 def live_plot_thread(targets_set):
@@ -148,41 +218,77 @@ def live_plot_thread(targets_set):
 
     # Add Stop and Save button
     button_ax = fig.add_axes([0.80, 0.01, 0.18, 0.05])
-    stop_button = Button(button_ax, 'Stop and Save', color='red', hovercolor='salmon')
+    stop_button = Button(button_ax, 'Stop and Save', color='yellow', hovercolor='salmon')
     stop_button.on_clicked(lambda event: search_stop_event.set())
 
+    close_ax = fig.add_axes([0.60, 0.01, 0.18, 0.05])
+    close_button = Button(close_ax, 'Close Plot', color='gray', hovercolor='lightgray')
+
+    def on_close(event):
+        fig.savefig("final_route_plot.png", dpi=300, bbox_inches='tight')
+        print("📸 Saved plot image as final_route_plot.png")
+        plt.close('all')
+        os._exit(0)  # Exit cleanly from all threads
+
+    close_button.on_clicked(on_close)
+
     while True:
-        ax.clear()
-        all_names = [n for n, c in coords_cache.items() if c != (0.0, 0.0, 0.0)]
-        vx = [coords_cache[n][0] for n in all_names]
-        vy = [coords_cache[n][1] for n in all_names]
-        vz = [coords_cache[n][2] for n in all_names]
-        ax.scatter(vx, vy, vz, color='black', s=10, label="Visited")
+        if pause_plot_updates.is_set():
+            time.sleep(0.2)
+            continue
+        else:
+            try:
+                ax.clear()
+                all_names = [n for n, c in coords_cache.items() if c != (0.0, 0.0, 0.0)]
+                vx = [coords_cache[n][0] for n in all_names]
+                vy = [coords_cache[n][1] for n in all_names]
+                vz = [coords_cache[n][2] for n in all_names]
+                ax.scatter(vx, vy, vz, color='black', s=10, label="Visited")
 
-        if current_path:
-            px = [c[1][0] for c in current_path]
-            py = [c[1][1] for c in current_path]
-            pz = [c[1][2] for c in current_path]
-            ax.plot(px, py, pz, marker='o', color='cyan', label="Current Path")
+                # Path plotting
+                if current_path:
+                    px = [c[1][0] for c in current_path]
+                    py = [c[1][1] for c in current_path]
+                    pz = [c[1][2] for c in current_path]
+                    ax.plot(px, py, pz, marker='o', color='cyan', label="Current Path")
 
-        target_coords = [(name, coords_cache[name]) for name in targets_set if name in coords_cache]
-        if target_coords:
-            tx = [c[1][0] for c in target_coords]
-            ty = [c[1][1] for c in target_coords]
-            tz = [c[1][2] for c in target_coords]
-            ax.scatter(tx, ty, tz, color='purple', marker='^', s=40, label="Targets")
+                # Target plotting
+                target_coords = [(name, coords_cache[name]) for name in targets_set if name in coords_cache]
+                if target_coords:
+                    tx = [c[1][0] for c in target_coords]
+                    ty = [c[1][1] for c in target_coords]
+                    tz = [c[1][2] for c in target_coords]
+                    ax.scatter(tx, ty, tz, color='purple', marker='^', s=40, label="Targets")
 
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        ax.set_zlabel("Z")
-        ax.set_title("Live Route Search")
-        ax.legend(title=(
-            f"Current: {latest_status['current']}\n"
-            f"Target: {latest_status['target']}\n"
-            f"Path Length: {latest_status['path_len']}\n"
-            f"Remaining Distance: {latest_status['remaining']:.2f} ly"
-            + latest_status.get("legend_extra", "")
-        ))
+                ax.set_xlabel("X")
+                ax.set_ylabel("Y")
+                ax.set_zlabel("Z")
+                ax.set_title("Live Route Search")
+
+                ax.legend(title=(
+                    f"Current: {latest_status['current']}\n"
+                    f"Target: {latest_status['target']}\n"
+                    f"Path Length: {latest_status['path_len']}\n"
+                    f"Remaining Distance: {latest_status['remaining']:.2f} ly"
+                    + latest_status.get("legend_extra", "")
+                ))
+
+            except Exception as e:
+                latest_status["plotting_failed"] = True
+                print(f"❌ Plotting error: {e}")
+
+        if latest_status.get("plotting_failed"):
+            ax.text2D(
+                0.5, 0.5,
+                "PLOTTING FAILED",
+                transform=ax.transAxes,
+                fontsize=50,
+                fontweight='bold',
+                ha='center',
+                va='center',
+                color='white',
+                bbox=dict(facecolor='red', alpha=0.9, edgecolor='black', boxstyle='round,pad=1.0')
+            )
         plt.draw()
         plt.pause(0.2)
 
@@ -202,7 +308,35 @@ def print_route_with_distances(route):
     print(f"\n🧮 Total distance: {total_distance:.4f} ly")
 
 if __name__ == "__main__":
-    start_system = input("Enter starting system name: ").strip()
+    def get_start_system_popup():
+        input_root = tk.Tk()
+        input_root.title("Enter Starting System")
+        input_root.geometry("400x120")
+
+        tk.Label(input_root, text="Enter starting system name:", font=("Helvetica", 12)).pack(pady=10)
+        entry = tk.Entry(input_root, font=("Helvetica", 12), width=30)
+        entry.pack()
+
+        start_value = {"system": None}
+
+        def on_submit():
+            val = entry.get().strip()
+            if val:
+                start_value["system"] = val
+                input_root.quit()
+                input_root.destroy()
+
+        submit_button = tk.Button(input_root, text="Submit", command=on_submit, font=("Helvetica", 11))
+        submit_button.pack(pady=10)
+
+        input_root.mainloop()
+        return start_value["system"]
+
+    start_system = get_start_system_popup()
+
+    if not start_system:
+        print("❌ No starting system entered. Exiting.")
+        sys.exit(0)
     try:
         targets = get_populated_targets(start_system)
 
@@ -287,28 +421,57 @@ if __name__ == "__main__":
 
         if route:
             print_route_with_distances(route)
-            with open("route_output.csv", "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["Step", "System", "X", "Y", "Z", "Distance from Previous"])
-                total = 0.0
-                for i in range(len(route)):
-                    coords = get_coordinates(route[i])
-                    if i == 0:
-                        writer.writerow([1, route[i], *coords, 0])
-                    else:
-                        prev = get_coordinates(route[i-1])
-                        dist = distance_squared(coords, prev) ** 0.5
-                        total += dist
-                        writer.writerow([i+1, route[i], *coords, dist])
-                latest_status["legend_extra"] = f"\nRoute Saved: route_output.csv\nTotal Distance: {total:.2f} ly"
-            print("\n✅ Route (partial or full) saved. Plot will remain open. Close the plot window or press Ctrl+C to exit.")
-            try:
-                while True:
-                    time.sleep(1)
-            except KeyboardInterrupt:
-                print("\n👋 Exiting.")
-        else:
-            print("❌ No route found or saved.")
 
+            def save_route_to_csv(route):
+                start = route[0].replace(" ", "_")
+                end = route[-1].replace(" ", "_")
+                filename = f"{start}_to_{end}_in_{len(route)}.csv"
+                with open(filename, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Step", "System", "X", "Y", "Z", "Distance from Previous"])
+                    total = 0.0
+                    for i in range(len(route)):
+                        coords = get_coordinates(route[i])
+                        if i == 0:
+                            writer.writerow([1, route[i], *coords, 0])
+                        else:
+                            prev = get_coordinates(route[i-1])
+                            dist = distance_squared(coords, prev) ** 0.5
+                            total += dist
+                            writer.writerow([i+1, route[i], *coords, dist])
+                    latest_status["legend_extra"] = f"\nRoute Saved: {filename}\nTotal Distance: {total:.2f} ly"
+                return filename
+
+            best_route = route
+            best_len = len(route)
+            save_route_to_csv(best_route)
+            # Ask user if we should keep optimizing
+            root = tk.Tk()
+            root.withdraw()
+            continue_search = messagebox.askyesno(
+                "Optimize Route?",
+                f"A route was found from {best_route[0]} to {best_route[-1]} in {best_len} jumps.\n\n"
+                "Would you like to continue searching for a shorter route?"
+            )
+            root.destroy()
+            if continue_search:
+                    while not search_stop_event.is_set():
+                        next_route = find_path(start_system, targets)
+                        if not next_route or len(next_route) >= best_len:
+                            latest_status["optimization_done"] = True
+                            break
+                        best_route = next_route
+                        best_len = len(next_route)
+                        save_route_to_csv(best_route)
+                        print(f"\n🔁 Found better route! Now {best_len} jumps.")
+            print("\n✅ Final route saved. Plot will remain open. Press Ctrl+C to exit.")
+        pause_plot_updates.set()
+        show_route_summary_popup(best_route)
+        pause_plot_updates.clear()
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n👋 Exiting.")
     except Exception as e:
         print(f"⚠️ Error: {e}")
