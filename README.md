@@ -3,7 +3,7 @@ Colonization Route Workbench (CRoW) helps you identify routes to target systems 
 
 **Dependencies**:  This is a python program and utilizes the following libraries: requests, heapq, json, os, platform, sys, threading, time, csv, tkinter, matplotlib.pyplot, mpl_toolkits.mplot3d, and webbrowser
 
-**Methodology**:   The program uses two separate API endpoint queries from (Ardent Laboratory's API)[https://github.com/iaincollins/ardent-api?tab=readme-ov-file].  The first finds the 20 closest stations that offer refuel as a service within 500ly. These are the default target systems that CRoW will try to route towards. 
+**Methodology**:   The program uses two separate API endpoint queries from Ardent Laboratory's API: https://github.com/iaincollins/ardent-api?tab=readme-ov-file.  The first finds the 20 closest stations that offer refuel as a service within 500ly. These are the default target systems that CRoW will try to route towards. 
 
 The second API endpoint finds all systems within 15 ly of a given system.  This is a rounded distance so the xyz coordinates are checked for any system with 15ly given as a distance. 
 
