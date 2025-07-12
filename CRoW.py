@@ -8,7 +8,7 @@ import threading
 import time
 import csv
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import webbrowser
@@ -243,7 +243,7 @@ if __name__ == "__main__":
                 label.pack(side="left")
                 label.bind("<Button-1>", lambda e, name=system_name: open_link(name))
             except Exception as e:
-                tk.messagebox.showerror("Error", f"Could not resolve system: {system_name}")
+                messagebox.showerror("Error", f"Could not find system: {system_name}")
 
         # --- Add checkboxes for each system ---
         for t, dist in targets_with_dist:
