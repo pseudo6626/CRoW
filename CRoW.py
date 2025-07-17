@@ -465,9 +465,9 @@ if __name__ == "__main__":
                         save_route_to_csv(best_route)
                         print(f"\n🔁 Found better route! Now {best_len} jumps.")
             print("\n✅ Final route saved. Plot will remain open. Press Ctrl+C to exit.")
-        pause_plot_updates.set()
-        show_route_summary_popup(best_route)
-        pause_plot_updates.clear()
+            pause_plot_updates.set()
+            show_route_summary_popup(best_route)
+            pause_plot_updates.clear()
         try:
             while True:
                 time.sleep(1)
